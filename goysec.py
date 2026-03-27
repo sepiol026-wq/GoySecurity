@@ -93,26 +93,28 @@ ATTR_RISK = {
 }
 
 STR_PAT = [
-    (re.compile(r"(?i)\b(?:auth[_-]?key|session[_-]?string)\b"), "session", "Сессионный секрет", 15),
-    (re.compile(r"(?i)\b(?:discord\s*token|token\s*grab|stealer|rat|keylogger|clipper)\b"), "stealer", "Stealer-паттерн", 40),
-    (re.compile(r"(?i)\b(?:webhook|pastebin|discord\.com/api/webhooks|api\.telegram\.org/bot)\b"), "exfil", "Канал вывода данных", 20),
-    (re.compile(r"(?i)\b(?:powershell\s+-enc|cmd\.exe\s+/c|bash\s+-i|sh\s+-i|nc\s+-e|/dev/tcp/)\b"), "exec", "Shell-паттерн", 40),
-    (re.compile(r"(?i)\b(?:anti[-_ ]?debug|anti[-_ ]?vm)\b"), "sandbox", "Антианализ", 25),
-    (re.compile(r"(?i)\b(?:tdata|D877F783D5D3EF8C|A7F324)\b"), "stealer", "Telegram Desktop tdata", 30),
+    (re.compile(r"(?i)\b(?:auth[_-]?key|session[_-]?string|api[_-]?hash|bot[_-]?token)\b"), "session", "Сессионный секрет", 15),
+    (re.compile(r"(?i)\b(?:discord\s*token|token\s*grab|stealer|rat|keylogger|clipper|spyware|malware)\b"), "stealer", "Stealer-паттерн", 45),
+    (re.compile(r"(?i)\b(?:webhook|pastebin|discord\.com/api/webhooks|api\.telegram\.org/bot|ngrok|localtunnel|webhook\.site)\b"), "exfil", "Канал вывода данных", 25),
+    (re.compile(r"(?i)\b(?:powershell|cmd\.exe|/bin/sh|/bin/bash|nc\s+-e|/dev/tcp/|subprocess\.run|os\.system|pty\.spawn)\b"), "exec", "Shell-паттерн", 35),
+    (re.compile(r"(?i)\b(?:anti[-_ ]?debug|anti[-_ ]?vm|is_debugger_present|check_sandbox|ptrace|sysctl|hw\.model|vmware|vbox|qemu)\b"), "sandbox", "Антианализ", 35),
+    (re.compile(r"(?i)\b(?:tdata|D877F783D5D3EF8C|A7F324|key4\.db|logins\.json|cookies\.sqlite|history\.sqlite)\b"), "stealer", "Браузерные/TG данные", 40),
+    (re.compile(r"(?i)\b(?:exodus|metamask|phantom|tronlink|atomicwallet|guarda|coinomi|trustwallet)\b"), "stealer", "Крипто-кошелек", 45),
 ]
 
 PATH_PAT = [
-    (re.compile(r"(?i)(?:/etc/passwd|/etc/shadow|/proc/self/environ|login data|web data|local state)"), "stealer", "Секретный путь", 30),
-    (re.compile(r"(?i)(?:Telegram[\\/]tdata|tdata[\\/]D877|AppData[\\/]Roaming[\\/]Telegram)"), "stealer", "Telegram tdata путь", 40),
+    (re.compile(r"(?i)(?:/etc/passwd|/etc/shadow|/proc/self/environ|login data|web data|local state|cookies|wallet\.dat)"), "stealer", "Путь к секретам", 30),
+    (re.compile(r"(?i)(?:Telegram[\\/]tdata|tdata[\\/]D877|AppData[\\/]Roaming[\\/]Telegram|Local[\\/]Google[\\/]Chrome|Local Storage[\\/]leveldb)"), "stealer", "Путь к данным приложения", 40),
+    (re.compile(r"(?i)(?:\.config/autostart|\.bashrc|\.profile|/etc/systemd/system|crontab)"), "persistence", "Механизм автозагрузки", 30),
 ]
 
 OBF_PAT = [
-    (re.compile(r"(?i)\b(?:eval\(|exec\(|globals\(\)\[|locals\(\)\[|__import__\()"), 15),
-    (re.compile(r"(?i)\b(?:marshal\.loads\s*\(\s*zlib\.decompress|zlib\.decompress\s*\(\s*base64)\b"), 30),
-    (re.compile(r"(?i)\b(?:eval\(|exec\()\s*(?:base64\.b64decode|binascii\.unhexlify|zlib\.decompress)\b"), 40),
+    (re.compile(r"(?i)\b(?:eval\(|exec\(|globals\(\)\[|locals\(\)\[|__import__\()"), 20),
+    (re.compile(r"(?i)\b(?:marshal\.loads|zlib\.decompress|base64\.b64decode|binascii\.unhexlify|lzma\.decompress|getattr\(.*?['\"]__builtins__['\"])\b"), 25),
+    (re.compile(r"(?i)\b(?:getattr|setattr|hasattr)\b.*\b(?:__builtins__|__dict__|__subclasses__|__class__|__mro__)\b"), 35),
 ]
 
-RISK_STRONG = {"session", "exfil", "stealer", "spy", "clipper", "ransom", "loader", "trojan", "browser", "secret"}
+RISK_STRONG = {"session", "exfil", "stealer", "spy", "clipper", "ransom", "loader", "trojan", "browser", "secret", "persistence", "crypto"}
 RISK_WEAK = {"process", "net", "storage", "runtime", "crypto", "decode", "import", "sandbox"}
 
 @dataclass
@@ -197,44 +199,39 @@ class Analyzer:
 
     def _maybe_decode(self, name: str, data: bytes) -> str:
         for enc in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
-            try:
-                return data.decode(enc)
-            except Exception:
-                pass
-                
+            try: return data.decode(enc)
+            except: pass
         for fn in (gzip.decompress, bz2.decompress, lzma.decompress):
             try:
                 data = fn(data)
                 break
-            except Exception:
-                pass
-                
+            except: pass
         return data.decode("utf-8", "ignore")
+
+    def _entropy(self, data: str) -> float:
+        if not data: return 0.0
+        occ = {}
+        for c in data: occ[c] = occ.get(c, 0) + 1
+        import math
+        ent = 0.0
+        for count in occ.values():
+            p = count / len(data)
+            ent -= p * math.log2(p)
+        return ent
 
     def _try_decode_layer(self, text: str) -> Tuple[str, str]:
         s = text.strip()
-        if not s:
-            return text, ""
-            
-        plain = s.replace("\n", "")
+        if not s: return text, ""
+        plain = s.replace("\n", "").replace(" ", "")
         if len(plain) > 60 and B64_RE.fullmatch(plain) and len(plain) % 4 == 0:
-            try:
-                return base64.b64decode(plain, validate=False).decode("utf-8", "ignore"), "Base64"
-            except Exception:
-                pass
-                
-        if len(plain) > 80 and HEX_RE.fullmatch(plain.replace(" ", "")):
-            try:
-                return binascii.unhexlify(plain.replace(" ", "")).decode("utf-8", "ignore"), "Hex"
-            except Exception:
-                pass
-                
+            try: return base64.b64decode(plain, validate=False).decode("utf-8", "ignore"), "Base64"
+            except: pass
+        if len(plain) > 80 and HEX_RE.fullmatch(plain):
+            try: return binascii.unhexlify(plain).decode("utf-8", "ignore"), "Hex"
+            except: pass
         for fn, m_name in ((gzip.decompress, "Gzip"), (bz2.decompress, "Bzip2"), (lzma.decompress, "Lzma")):
-            try:
-                return fn(s.encode("utf-8", "ignore")).decode("utf-8", "ignore"), m_name
-            except Exception:
-                pass
-                
+            try: return fn(s.encode("utf-8", "ignore")).decode("utf-8", "ignore"), m_name
+            except: pass
         return text, ""
 
     def _scan_single(self, name: str, text: str) -> None:
@@ -243,31 +240,32 @@ class Analyzer:
         self._scan_ast(src)
 
     def _scan_text(self, text: str, source: str) -> None:
-        if not text:
-            return
-            
+        if not text: return
         for rx, family, title, score in STR_PAT:
             for m in rx.finditer(text):
                 sev = "warning" if score < 30 else "critical"
                 self._add(sev, title, self._excerpt(text, m.start(), m.end()), source, self._pos(text, m.start()), score, family)
-                
         for rx, family, title, score in PATH_PAT:
             for m in rx.finditer(text):
                 sev = "warning" if score < 30 else "critical"
                 self._add(sev, title, self._excerpt(text, m.start(), m.end()), source, self._pos(text, m.start()), score, family)
-                
         for rx, score in OBF_PAT:
             for m in rx.finditer(text):
-                sev = "warning" if score < 15 else "critical"
+                sev = "warning" if score < 20 else "critical"
                 self._add(sev, "Обфускация/Декодер", self._excerpt(text, m.start(), m.end()), source, self._pos(text, m.start()), score, "obf")
-                
         for m in URL_RE.finditer(text):
             url = m.group(0)
             fam = "exfil" if any(d in url.lower() for d in SUS_DOMAINS) else "net"
-            score = 30 if fam == "exfil" else 0
+            score = 35 if fam == "exfil" else 0
             if score > 0:
-                sev = "warning" if fam == "net" else "critical"
+                sev = "critical" if fam == "exfil" else "warning"
                 self._add(sev, "Подозрительный URL", url, source, self._pos(text, m.start()), score, fam)
+        
+        for m in re.finditer(r'["\']([A-Za-z0-9+/]{40,})["\']', text):
+            token = m.group(1)
+            ent = self._entropy(token)
+            if ent > 4.5:
+                self._add("warning", "Энтропия данных", f"Слишком высокая энтропия ({ent:.2f})", source, self._pos(text, m.start()), 20, "obf")
 
     def _scan_ast(self, src: SourceUnit) -> None:
         try:
@@ -305,18 +303,16 @@ class Analyzer:
     def _synergy(self) -> None:
         fams = {h.family for h in self.hits}
         crit_count = sum(1 for h in self.hits if h.sev == "critical")
-        
         if "session" in fams and "exfil" in fams:
-            self._add("critical", "Synergy: Кража сессии", "Сессионные признаки + вывод наружу", "bundle", (1, 1), 60, "stealer")
-            
-        if "stealer" in fams and ("exfil" in fams or "session" in fams):
-            self._add("critical", "Synergy: Stealer-поведение", "Сбор секретов в связке с эксфильтрацией", "bundle", (1, 1), 70, "stealer")
-            
+            self._add("critical", "Synergy: Кража сессии", "Сессионные признаки + вывод наружу", "bundle", (1, 1), 75, "stealer")
+        if ("stealer" in fams or "crypto" in fams) and "exfil" in fams:
+            self._add("critical", "Synergy: Stealer-активность", "Сбор данных + эксфильтрация", "bundle", (1, 1), 90, "stealer")
         if "sandbox" in fams and "exec" in fams and "obf" in fams:
-            self._add("critical", "Synergy: Малварь", "Антианализ + обфускация + исполнение", "bundle", (1, 1), 80, "loader")
-            
+            self._add("critical", "Synergy: Малварь", "Антианализ + обфускация + исполнение", "bundle", (1, 1), 95, "loader")
+        if "persistence" in fams and ("net" in fams or "exec" in fams):
+            self._add("critical", "Synergy: Бэкдор/Троян", "Автозагрузка + удаленный доступ", "bundle", (1, 1), 80, "trojan")
         if crit_count >= 3:
-            self._add("critical", "Множественные угрозы", f"Найдено {crit_count} критичных маркеров", "bundle", (1, 1), 50, "general")
+            self._add("critical", "Множественные угрозы", f"Найдено {crit_count} критических маркеров", "bundle", (1, 1), 65, "general")
 
     def _risk(self, s: int) -> str:
         if s >= 150: return "critical"
@@ -527,13 +523,13 @@ class GoySecurity(loader.Module):
     """
     strings = {
         "name": "GoySecurity",
-        "loading": "<b>🛡 GoySecurity Sandbox инициализирован...</b>",
-        "stage_fetch": "📥 <code>Извлечение кода и дамп памяти...</code>",
-        "stage_extract": "📦 <code>Декомпиляция и распаковка...</code>",
-        "stage_decode": "🧬 <code>Снятие крипторов...</code>",
-        "stage_parse": "🧠 <code>Taint-анализ графа вызовов...</code>",
-        "stage_rules": "⚔️ <code>Статический анализ...</code>",
-        "stage_ai": "🤖 <code>Нейро-анализ кода (Gemini API)...</code>",
+        "loading": "<b>🛡 GoySecurity Sandbox</b>",
+        "stage_fetch": "📥 <code>Сбор данных...</code>",
+        "stage_extract": "📦 <code>Анализ структуры...</code>",
+        "stage_decode": "🧬 <code>Снятие защиты...</code>",
+        "stage_parse": "🧠 <code>Когнитивный разбор...</code>",
+        "stage_rules": "⚔️ <code>Сигнатурный поиск...</code>",
+        "stage_ai": "🤖 <code>Мнение ИИ (Gemini)...</code>",
         "no_code": "⚠️ Код не найден. Убедитесь, что вы ответили на файл .py или прислали ссылку.",
         "header": "<b>🛡️ GoySecurity by Goy(@samsepi0l_ovf)</b>\n",
         "summary": (
@@ -644,92 +640,73 @@ class GoySecurity(loader.Module):
             await asyncio.sleep(0.3)
             msg = await msg.reply(chunk)
 
-    async def _ask_gemini(self, token: str, code: str, model_name: str) -> Optional[Dict[str, Any]]:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={token}"
-            prompt = (
-                "Ты — старший ИБ-аналитик. Проверь этот Python-код (модуль Telegram юзербота) на вредоносную активность (кража сессий, стиллеры, бэкдоры, спамеры). "
-                "Игнорируй обычное использование base64, requests, os, sys, telethon, если они используются в легитимных целях (например, для автоапдейта, скачивания файлов, бэкапов). Учти, что 99% модулей юзерботов используют эти библиотеки безопасно. "
-                "Сконцентрируйся только на РЕАЛЬНЫХ угрозах. "
-                "Ответь СТРОГО в формате валидного JSON без markdown-разметки (без ```json). "
-                "Схема JSON:\n"
-                "{\n"
-                '  "verdict": "Абсолютно безопасно" | "Подозрительно" | "Вредонос" | "Стилер",\n'
-                '  "reason": "Краткое объяснение логики в 1-3 предложениях",\n'
-                '  "threats": ["угроза 1 (строка X)", "угроза 2"]\n'
-                "}"
-            )
-            payload = {
-                "contents": [{"parts": [{"text": prompt + "\n\nКод на анализ:\n" + code[:45000]}]}],
-                "generationConfig": {
-                    "temperature": 0.1, 
-                    "maxOutputTokens": 4096,
-                    "responseMimeType": "application/json"
+    async def _ask_gemini(self, token: str, code: str, model_name: str, static_res: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        for attempt in range(5):
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={token}"
+                analysis_summary = ""
+                if static_res:
+                    analysis_summary = (
+                        f"Результаты статики: Риск {static_res['risk']}, "
+                        f"Очков {static_res['score']}, "
+                        f"Семейство {static_res['family']} ({static_res['family_conf']}%)\n"
+                        f"Флаги: {', '.join([h['title'] for h in static_res.get('critical', [])])}\n"
+                    )
+                
+                prompt = (
+                    "Ты — эксперт Malware-аналитик. Проверь Python-код на вредоносную активность (сессии, стилеры, бэкдоры). "
+                    "Игнорируй штатное использование библиотек для легитимных целей. "
+                    "Мне не нужно твое упоминание статического анализа в ответе, используй его только как подсказку для себя. "
+                    "Если статика совпадает с твоими выводами - это подтверждение. "
+                    "Ответь СТРОГО в формате JSON без markdown: "
+                    '{"verdict": "Безопасно"|"Подозрительно"|"Вредонос", "reason": "...", "threats": []}.'
+                )
+                
+                payload = {
+                    "contents": [{"parts": [{"text": f"{prompt}\n\n{analysis_summary}\n\nCODE:\n{code[:35000]}"}]}],
+                    "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
                 }
-            }
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(url, json=payload, timeout=40) as resp:
-                        if resp.status == 404:
-                            return {"error": True, "reason": f"Модель {model_name} не найдена (404)"}
-                        elif resp.status in (401, 403):
-                            return {"error": True, "reason": "Неверный API токен Google AI"}
-                        elif resp.status != 200:
-                            return {"error": True, "reason": f"Ошибка API Google ({resp.status})"}
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload, timeout=50) as resp:
+                        if resp.status == 429:
+                            await asyncio.sleep(2 ** attempt + 2)
+                            continue
+                        if resp.status != 200:
+                            return {"error": True, "reason": f"API Error {resp.status}"}
                             
                         data = await resp.json()
                         text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
                         
-                        match = re.search(r'\{.*\}', text, re.DOTALL)
-                        if match:
-                            text = match.group(0)
-                            
                         try:
-                            return json.loads(text)
-                        except Exception as e:
-                            log.error(f"Gemini JSON Parse Error: {e} - Raw text: {text}")
-                            return {"error": True, "reason": "Сбой парсинга JSON ответа нейросети"}
-                            
-                except asyncio.TimeoutError:
-                    return {"error": True, "reason": "Таймаут ожидания ответа от Gemini API"}
-                except aiohttp.ClientError as e:
-                    return {"error": True, "reason": f"Сетевая ошибка при запросе к API: {e}"}
-        except Exception as e:
-            log.error(f"Gemini Exception: {e}")
-            return {"error": True, "reason": "Внутренняя ошибка вызова API"}
+                            clean_text = re.sub(r'^```json\s*|\s*```$', '', text, flags=re.MULTILINE|re.IGNORECASE).strip()
+                            return json.loads(clean_text)
+                        except:
+                            match = re.search(r'\{.*\}', text, re.DOTALL)
+                            if match:
+                                try: return json.loads(match.group(0))
+                                except: pass
+                            return {"error": True, "reason": "JSON Parse Error"}
+            except Exception as e:
+                if attempt == 4: return {"error": True, "reason": str(e)}
+                await asyncio.sleep(1)
+        return None
 
     @loader.unrestricted
     @loader.ratelimit
     async def gscancmd(self, message):
         """<ответом на файл/ссылку/текст> — Проверить модуль на вирусы и стилеры"""
         args = utils.get_args_raw(message).strip()
-        status = self.strings("loading")
-        await utils.answer(message, status)
+        status_msg = await utils.answer(message, self.strings("loading"))
         
         try:
-            status += "\n" + self.strings("stage_fetch")
-            await self._stage(message, status)
             srcs = await self._resolve(message, args)
-            
             if not srcs:
                 await utils.answer(message, self.strings("no_code"))
                 return
             
-            status += "\n" + self.strings("stage_extract")
-            await self._stage(message, status)
-            await asyncio.sleep(0.1)
-            
-            status += "\n" + self.strings("stage_decode")
-            await self._stage(message, status)
-            await asyncio.sleep(0.1)
-            
-            status += "\n" + self.strings("stage_parse")
-            await self._stage(message, status)
-            await asyncio.sleep(0.1)
-            
-            status += "\n" + self.strings("stage_rules")
-            await self._stage(message, status)
-            await asyncio.sleep(0.1)
+            if self.config["ui_updates"]:
+                await utils.answer(status_msg, f"{self.strings('loading')}\n{self.strings('stage_rules')}")
             
             self.av.mode = self._mode
             res = self.av.scan(srcs)
@@ -742,9 +719,9 @@ class GoySecurity(loader.Module):
             gemini_model = str(self.config.get("gemini_model", "gemini-3-flash-preview")).strip()
             
             if gemini_token:
-                status += "\n" + self.strings("stage_ai")
-                await self._stage(message, status)
-                ai_result = await self._ask_gemini(gemini_token, res["decoded"], gemini_model)
+                if self.config["ui_updates"]:
+                    await utils.answer(status_msg, f"{self.strings('loading')}\n{self.strings('stage_rules')}\n{self.strings('stage_ai')}")
+                ai_result = await self._ask_gemini(gemini_token, res["decoded"], gemini_model, res)
                 if ai_result and ai_result.get("error"):
                     api_error = ai_result.get("reason")
                     ai_result = None
@@ -1056,8 +1033,10 @@ class GoySecurity(loader.Module):
         verdict = html.escape(str(ai_result.get("verdict", "Неизвестно")))
         out.append(f"<b>⚖️ Вердикт:</b> <code>{verdict}</code>")
         
-        reason = html.escape(str(ai_result.get("reason", "Нет данных")))
-        out.append(f"<b>🛡 Обоснование:</b> {reason}")
+        reason = str(ai_result.get("reason", "Нет данных"))
+        if len(reason) > 2800:
+            reason = reason[:2797] + "..."
+        out.append(f"<b>🛡 Обоснование:</b> {html.escape(reason)}")
         
         threats = ai_result.get("threats", [])
         if threats:
